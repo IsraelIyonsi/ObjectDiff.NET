@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-21
+
+### Added
+
+- `DiffOptions.MatchCollectionElementsByKey<T>(Func<T, object?> keySelector)`: opt-in, per-element-type key-based collection matching. When both compared collections have an element type with a registered key selector, elements are paired by key instead of by position, exactly as dictionary entries are. Matched keys recurse into the element diff, producing stable dictionary-style paths such as `Orders["ORD-9"].Total`; keys present on only one side are reported as a whole `Added` or `Removed`; reordering the collection no longer produces spurious changes. Nested keyed collections (a keyed list inside a keyed element) are supported, and existing `MaxDepth`, ignore rules and custom comparers are respected within the recursed element diffs.
+- Duplicate keys within one collection (including two `null` keys) abort the comparison with an `ObjectDiffException` rather than silently discarding an element. A `null` element and an element whose selector returns a `null` key are treated identically, as a single null-key slot rendered `[null]` in the path.
+- `ObjectDiffException` gained a message-only constructor for comparison failures that have no underlying exception, such as a duplicate key.
+
+### Unchanged
+
+- Collections whose element type has no registered selector keep the existing longest-common-subsequence positional comparison, so behavior with no selector registered is identical to 0.1.0.
+
 ## [0.1.0] - 2026-08-12
 
 ### Added

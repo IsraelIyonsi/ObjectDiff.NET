@@ -74,11 +74,55 @@ var options = new DiffOptions()
 DiffResult result = ObjectDiffer.Compare(before, after, options);
 ```
 
+## Matching list elements by key
+
+By default a `List<T>` or array is aligned by position, so reordering it, even with no real change, shows up as a churn of `Added` and `Removed` entries, and the index in a path (`Orders[1].Total`) shifts whenever something is inserted or removed earlier in the list. When your elements have a natural identity, opt them into key-based matching and they are paired by that key instead, exactly the way dictionary entries are:
+
+```csharp
+using ObjectDiff;
+
+var before = new Order[]
+{
+    new() { Ref = "ORD-9", Total = 4500m },
+    new() { Ref = "ORD-3", Total = 1200m },
+};
+
+var after = new Order[]
+{
+    new() { Ref = "ORD-3", Total = 1200m },   // same orders, reordered
+    new() { Ref = "ORD-9", Total = 4750m },   // ORD-9 changed
+};
+
+var options = new DiffOptions()
+    .MatchCollectionElementsByKey<Order>(o => o.Ref);
+
+DiffResult result = ObjectDiffer.Compare(before, after, options);
+
+foreach (var change in result.Changes)
+{
+    Console.WriteLine(change);
+}
+// Modified ["ORD-9"].Total: 4500 -> 4750
+```
+
+Without the selector the same reorder-plus-edit produces positional noise instead. With it:
+
+- The path uses the key, not the index: `["ORD-9"].Total` (or `Orders["ORD-9"].Total` when the list is a member), and stays stable no matter how the list is ordered.
+- A key present only on the new side is `Added`, a key present only on the old side is `Removed`, and a key on both sides recurses into the two elements.
+- Reordering alone produces no changes.
+
+Notes:
+
+- It is purely opt-in and per element type. Lists whose element type has no registered selector keep the default positional comparison, so you can mix a key-matched `List<Order>` and a plain `List<string>` in the same graph, and nest a key-matched list inside a key-matched element.
+- `MaxDepth`, `IgnoreType`, `IgnoreMember` and `UseComparer` all still apply inside the recursed element diffs.
+- A `null` element, and an element whose selector returns a `null` key, are treated the same: a single null-key slot rendered `[null]`.
+- If either side contains two elements that map to the same key, the comparison throws `ObjectDiffException` rather than silently dropping one, since discarding an element could hide a real change from an audit log. Return a key that is unique per element.
+
 ## How comparison works
 
 - **Value types and strings** (`int`, `decimal`, `DateTime`, `Guid`, `enum`, custom structs, `string`, and so on) are compared directly with `Equals`.
 - **Plain objects** are compared member by member (public properties and public fields), recursing into each one. Members are visited in alphabetical order, so the resulting change list is deterministic regardless of the runtime's reflection ordering. If a member's getter throws, the comparison stops and an `ObjectDiffException` is thrown identifying the member, its declaring type and the path reached so far, with the getter's own exception as `InnerException`; a poisoned property aborts the diff instead of silently omitting that member.
-- **Lists and arrays** are aligned by content using a longest-common-subsequence algorithm, not by naive index-by-index comparison. Inserting or removing one element in the middle of a list produces one `Added` or `Removed` change, not a chain of `Modified` entries for every element after it. There is no key selector: when an element differs from the counterpart it aligns to positionally, the pair is recursed into just like any other value, so changing one field on a complex element, for example a `List<Order>` entry, produces a single `Modified` change with a nested path such as `Orders[1].Total` rather than a whole-object `Removed` plus `Added` rendered via `ToString()`. Only when a run of removals and a run of additions are unbalanced does the excess on the longer side fall back to plain `Removed`/`Added`. The index in a list path is the position an element aligned to, not a stable key, and can shift when unrelated insertions or removals happen elsewhere in the same list; an `Added` path and a `Removed` path can render identically since they each index their own side, so key changes by `(Path, Kind)`, not `Path` alone, if you need to correlate them.
+- **Lists and arrays** are aligned by content using a longest-common-subsequence algorithm, not by naive index-by-index comparison. Inserting or removing one element in the middle of a list produces one `Added` or `Removed` change, not a chain of `Modified` entries for every element after it. By default there is no key selector: when an element differs from the counterpart it aligns to positionally, the pair is recursed into just like any other value, so changing one field on a complex element, for example a `List<Order>` entry, produces a single `Modified` change with a nested path such as `Orders[1].Total` rather than a whole-object `Removed` plus `Added` rendered via `ToString()`. Only when a run of removals and a run of additions are unbalanced does the excess on the longer side fall back to plain `Removed`/`Added`. The index in a list path is the position an element aligned to, not a stable key, and can shift when unrelated insertions or removals happen elsewhere in the same list; an `Added` path and a `Removed` path can render identically since they each index their own side, so key changes by `(Path, Kind)`, not `Path` alone, if you need to correlate them. To match list elements by identity instead of position, opt in per element type with `DiffOptions.MatchCollectionElementsByKey<T>` (see [Matching list elements by key](#matching-list-elements-by-key)).
 - **Sets** (anything implementing `ISet<T>` or `IReadOnlySet<T>`, which covers `HashSet<T>`, `SortedSet<T>` and their immutable/frozen counterparts) are compared by content, not by enumeration order: each left element is matched against the first not-yet-matched right element it is structurally equal to, so two sets with the same members in a different order produce no changes. Unmatched elements are `Removed` or `Added`.
 - **Dictionaries** are compared by key, whether they implement the non-generic `System.Collections.IDictionary` (`Dictionary<TKey,TValue>`, `ConcurrentDictionary<TKey,TValue>`, `SortedDictionary<TKey,TValue>`, `Hashtable`) or only the generic `IDictionary<TKey,TValue>` / `IReadOnlyDictionary<TKey,TValue>` interfaces (for example `ImmutableDictionary<TKey,TValue>`, which does not implement the non-generic interface). Keys present on only one side are `Added` or `Removed`; keys present on both with different values are `Modified`. Keys are visited in a deterministic sort order, not dictionary enumeration order. A string key is rendered quoted in the path, with any backslash or embedded quote escaped; a non-string key's text has any backslash or embedded `]` escaped, so a key's own content can never be mistaken for the end of the indexer segment.
 - **Cycles** are detected. If the same pair of references is already being compared higher up the call stack, the comparison stops there instead of recursing forever, so a self-referential graph completes normally.
@@ -92,7 +136,7 @@ DiffResult result = ObjectDiffer.Compare(before, after, options);
 | `DiffResult` | `AreEqual` plus the flat `Changes` list. |
 | `Change` | `Path`, `Kind`, `OldValue`, `NewValue` for one difference. |
 | `ChangeKind` | `Added`, `Removed`, `Modified`. |
-| `DiffOptions` | `MaxDepth`, `IgnoreType`, `IgnoreMember`, `UseComparer`. |
+| `DiffOptions` | `MaxDepth`, `IgnoreType`, `IgnoreMember`, `UseComparer`, `MatchCollectionElementsByKey`. |
 | `ChangeSummaryFormatter` | Renders a `Change` or `DiffResult` as human-readable, audit-log-suitable text. |
 | `ObjectDiffException` | Thrown when reading a compared object's member throws; wraps the original exception. |
 

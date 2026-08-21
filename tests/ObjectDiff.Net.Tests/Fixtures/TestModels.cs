@@ -43,6 +43,29 @@ public sealed class Container
     public Dictionary<int, string> Scores { get; set; } = new();
 }
 
+public sealed class KeyedOrder
+{
+    public string? Ref { get; set; }
+
+    public decimal Total { get; set; }
+
+    public List<KeyedLine> Lines { get; set; } = new();
+}
+
+public sealed class KeyedLine
+{
+    public string Sku { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+}
+
+public sealed class OrderBook
+{
+    public List<KeyedOrder> Orders { get; set; } = new();
+
+    public List<string> Tags { get; set; } = new();
+}
+
 public readonly struct Point
 {
     public Point(int x, int y)

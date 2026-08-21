@@ -12,6 +12,14 @@ internal static class DiffEngine
     private const string EscapedBackslash = "\\\\";
     private const string EscapedQuote = "\\\"";
     private const string EscapedIndexClose = "\\]";
+    private const string DuplicateKeyRootLocation = "The root collection";
+    private const string DuplicateKeyPathLocationPrefix = "The collection at path '";
+    private const string DuplicateKeyPathLocationSuffix = "'";
+    private const string DuplicateKeyMessageMiddle = " has more than one element mapping to key ";
+    private const string DuplicateKeyMessageSuffix =
+        ". Register a key selector that returns a unique key for each element, or remove the duplicate.";
+
+    private static readonly object NullElementKey = new();
 
     public static void CompareValues(
         object? left,
@@ -97,6 +105,11 @@ internal static class DiffEngine
                      CollectionShape.IsUnordered(leftType))
             {
                 CompareUnorderedSequences(leftUnorderedSequence, rightUnorderedSequence, path, depth, context, changes);
+            }
+            else if (left is IEnumerable leftKeyedElements && right is IEnumerable rightKeyedElements &&
+                     TryGetElementKeySelector(leftType, context.Options, out var elementKeySelector))
+            {
+                CompareKeyedElements(leftKeyedElements, rightKeyedElements, elementKeySelector, path, depth, context, changes);
             }
             else if (left is IEnumerable leftSequence && right is IEnumerable rightSequence)
             {
@@ -412,6 +425,112 @@ internal static class DiffEngine
         }
     }
 
+    private static bool TryGetElementKeySelector(Type collectionType, DiffOptions options, out Func<object, object?> keySelector)
+    {
+        if (!options.HasKeySelectors)
+        {
+            keySelector = null!;
+            return false;
+        }
+
+        foreach (var elementType in CollectionShape.GetElementTypes(collectionType))
+        {
+            if (options.TryGetKeySelector(elementType, out keySelector))
+            {
+                return true;
+            }
+        }
+
+        keySelector = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Compares two collections whose element type opted into key-based matching via
+    /// <see cref="DiffOptions.MatchCollectionElementsByKey{T}"/>. Elements are indexed by the key the
+    /// selector returns and matched by key rather than by position, so a reordered but otherwise
+    /// unchanged collection produces no changes. Keys present on only one side are reported as whole
+    /// <see cref="ChangeKind.Added"/> or <see cref="ChangeKind.Removed"/> elements; keys present on
+    /// both sides recurse via <see cref="CompareValues"/>, producing stable dictionary-style paths
+    /// such as <c>Orders["ORD-9"].Total</c>. A <see langword="null"/> element and an element with a
+    /// <see langword="null"/> key both map to a single null-key slot; a key that occurs twice on
+    /// either side aborts the comparison with an <see cref="ObjectDiffException"/>.
+    /// </summary>
+    private static void CompareKeyedElements(
+        IEnumerable left,
+        IEnumerable right,
+        Func<object, object?> keySelector,
+        string path,
+        int depth,
+        DiffContext context,
+        ICollection<Change> changes)
+    {
+        var leftByKey = IndexByKey(left, keySelector, path);
+        var rightByKey = IndexByKey(right, keySelector, path);
+
+        var keys = new HashSet<object>();
+        foreach (var key in leftByKey.Keys)
+        {
+            keys.Add(key);
+        }
+
+        foreach (var key in rightByKey.Keys)
+        {
+            keys.Add(key);
+        }
+
+        var orderedKeys = new List<object>(keys);
+        orderedKeys.Sort(KeyOrderComparer.Instance);
+
+        foreach (var normalizedKey in orderedKeys)
+        {
+            var displayKey = ReferenceEquals(normalizedKey, NullElementKey) ? null : normalizedKey;
+            var inLeft = leftByKey.TryGetValue(normalizedKey, out var leftValue);
+            var inRight = rightByKey.TryGetValue(normalizedKey, out var rightValue);
+            var keyPath = FormatKeyPath(path, displayKey);
+
+            if (inLeft && inRight)
+            {
+                CompareValues(leftValue, rightValue, keyPath, depth + 1, context, changes);
+            }
+            else if (inLeft)
+            {
+                changes.Add(new Change(keyPath, ChangeKind.Removed, leftValue, null));
+            }
+            else
+            {
+                changes.Add(new Change(keyPath, ChangeKind.Added, null, rightValue));
+            }
+        }
+    }
+
+    private static Dictionary<object, object?> IndexByKey(
+        IEnumerable source,
+        Func<object, object?> keySelector,
+        string path)
+    {
+        var map = new Dictionary<object, object?>();
+        foreach (var element in source)
+        {
+            var rawKey = element is null ? null : keySelector(element);
+            var normalizedKey = rawKey ?? NullElementKey;
+            if (!map.TryAdd(normalizedKey, element))
+            {
+                throw new ObjectDiffException(BuildDuplicateKeyMessage(path, rawKey));
+            }
+        }
+
+        return map;
+    }
+
+    private static string BuildDuplicateKeyMessage(string path, object? rawKey)
+    {
+        var location = path.Length == 0
+            ? DuplicateKeyRootLocation
+            : DuplicateKeyPathLocationPrefix + path + DuplicateKeyPathLocationSuffix;
+        return location + DuplicateKeyMessageMiddle + ValueText.Quoted(rawKey) + DuplicateKeyMessageSuffix;
+    }
+
     private static Dictionary<object, object?> MaterializeKeyValuePairs(IEnumerable source)
     {
         var map = new Dictionary<object, object?>();
@@ -459,7 +578,7 @@ internal static class DiffEngine
     /// consumers that need to correlate changes should key by <c>(Path, Kind)</c>, not by
     /// <see cref="Change.Path"/> alone.
     /// </summary>
-    private static string FormatKeyPath(string parent, object key)
+    private static string FormatKeyPath(string parent, object? key)
     {
         var keyText = key is string text
             ? StringQuote + EscapeQuotedKey(text) + StringQuote

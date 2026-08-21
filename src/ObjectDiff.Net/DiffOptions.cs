@@ -26,6 +26,7 @@ public sealed class DiffOptions
     private readonly HashSet<Type> _ignoredTypes = new();
     private readonly Dictionary<Type, HashSet<string>> _ignoredMembers = new();
     private readonly Dictionary<Type, IEqualityComparerAdapter> _comparers = new();
+    private readonly Dictionary<Type, Func<object, object?>> _keySelectors = new();
     private int _maxDepth = DefaultMaxDepth;
 
     /// <summary>
@@ -126,6 +127,45 @@ public sealed class DiffOptions
         return this;
     }
 
+    /// <summary>
+    /// Opts a collection element type into key-based matching. When two collections whose element
+    /// type is <typeparamref name="T"/> (or a type assignable to it) are compared and no registered
+    /// selector matches more specifically, elements are paired by the key that
+    /// <paramref name="keySelector"/> returns rather than by position, exactly as dictionary entries
+    /// are matched by key. A key present only on the right side is reported as
+    /// <see cref="ChangeKind.Added"/>, a key present only on the left as <see cref="ChangeKind.Removed"/>,
+    /// and a key present on both sides recurses into the two elements, producing stable
+    /// dictionary-style paths such as <c>Orders["ORD-9"].Total</c> that do not shift when the
+    /// collection is merely reordered. Collections whose element type has no registered selector keep
+    /// the default positional (longest-common-subsequence) comparison, so this feature is purely
+    /// additive and opt-in.
+    /// </summary>
+    /// <remarks>
+    /// A <see langword="null"/> element, and an element whose selector returns a <see langword="null"/>
+    /// key, are treated identically: both map to a single null-key slot. If either side of a
+    /// comparison contains two elements that map to the same key (including two null keys), the
+    /// comparison fails with an <see cref="ObjectDiffException"/> rather than silently discarding one
+    /// of them, since dropping an element would risk hiding a real difference from an audit log.
+    /// Registering a selector for a type replaces any selector previously registered for that exact
+    /// type.
+    /// </remarks>
+    /// <typeparam name="T">The collection element type the key selector applies to.</typeparam>
+    /// <param name="keySelector">
+    /// Produces the identity key for an element of type <typeparamref name="T"/>. It is never invoked
+    /// with a <see langword="null"/> element.
+    /// </param>
+    /// <returns>This instance, to allow chained configuration calls.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="keySelector"/> is <see langword="null"/>.</exception>
+    public DiffOptions MatchCollectionElementsByKey<T>(Func<T, object?> keySelector)
+    {
+        ArgumentNullException.ThrowIfNull(keySelector);
+
+        _keySelectors[typeof(T)] = element => keySelector((T)element);
+        return this;
+    }
+
+    internal bool HasKeySelectors => _keySelectors.Count > 0;
+
     internal bool IsTypeIgnored(Type runtimeType)
     {
         if (_ignoredTypes.Count == 0)
@@ -171,5 +211,31 @@ public sealed class DiffOptions
         }
 
         return _comparers.TryGetValue(runtimeType, out comparer!);
+    }
+
+    internal bool TryGetKeySelector(Type elementType, out Func<object, object?> keySelector)
+    {
+        if (_keySelectors.Count == 0)
+        {
+            keySelector = null!;
+            return false;
+        }
+
+        if (_keySelectors.TryGetValue(elementType, out keySelector!))
+        {
+            return true;
+        }
+
+        foreach (var entry in _keySelectors)
+        {
+            if (entry.Key.IsAssignableFrom(elementType))
+            {
+                keySelector = entry.Value;
+                return true;
+            }
+        }
+
+        keySelector = null!;
+        return false;
     }
 }
